@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 @MainActor
 final class AppModel: ObservableObject {
     @Published private(set) var isRecording = false
+    @Published private(set) var isOverlayVisible = false
     @Published private(set) var statusText = "Ready"
     @Published var lastError: String?
 
@@ -20,6 +21,7 @@ final class AppModel: ObservableObject {
 
     func startRecording() {
         guard !isRecording else { return }
+        showOverlay()
 
         Task {
             let allowed = await audioCapture.requestPermission()
@@ -47,7 +49,7 @@ final class AppModel: ObservableObject {
                 isRecording = true
                 statusText = "Recording"
                 lastError = nil
-                overlayController.show()
+                showOverlay()
                 startTimeoutLoop()
             } catch {
                 lastError = error.localizedDescription
@@ -77,8 +79,41 @@ final class AppModel: ObservableObject {
         isRecording ? stopRecording() : startRecording()
     }
 
+    func toggleRecordingFromOverlay() {
+        toggleRecording()
+        keepOverlayVisible()
+    }
+
     func toggleOverlay() {
+        if isOverlayVisible && overlayController.isVisible {
+            hideOverlay()
+        } else {
+            showOverlay()
+        }
+    }
+
+    func showOverlay() {
         overlayController.show()
+        isOverlayVisible = true
+    }
+
+    func hideOverlay() {
+        overlayController.hide()
+        isOverlayVisible = false
+    }
+
+    private func keepOverlayVisible() {
+        showOverlay()
+        Task {
+            try? await Task.sleep(for: .milliseconds(120))
+            await MainActor.run {
+                self.showOverlay()
+            }
+            try? await Task.sleep(for: .milliseconds(380))
+            await MainActor.run {
+                self.showOverlay()
+            }
+        }
     }
 
     func clearTranscript() {

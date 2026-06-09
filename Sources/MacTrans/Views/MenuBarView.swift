@@ -50,7 +50,7 @@ struct MenuBarView: View {
             }
             .keyboardShortcut("r")
 
-            Button("Show Overlay") {
+            Button(model.isOverlayVisible ? "Hide Overlay" : "Show Overlay") {
                 model.toggleOverlay()
             }
 

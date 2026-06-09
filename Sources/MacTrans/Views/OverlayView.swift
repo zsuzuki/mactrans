@@ -8,7 +8,7 @@ struct OverlayView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack {
+            HStack(spacing: 10) {
                 Text("MacTrans")
                     .font(.headline)
                 Spacer()
@@ -21,12 +21,24 @@ struct OverlayView: View {
                 .help(autoScroll ? "Auto-scroll is on" : "Resume auto-scroll")
 
                 Button {
-                    model.toggleRecording()
+                    model.toggleRecordingFromOverlay()
                 } label: {
                     Image(systemName: model.isRecording ? "stop.circle.fill" : "record.circle")
                 }
                 .buttonStyle(.plain)
                 .help(model.isRecording ? "Stop recording" : "Start recording")
+
+                Divider()
+                    .frame(height: 14)
+                    .opacity(0.6)
+
+                Button {
+                    model.hideOverlay()
+                } label: {
+                    Image(systemName: "xmark.circle")
+                }
+                .buttonStyle(.plain)
+                .help("Hide overlay")
 
                 Text("\(store.segments.count)")
                     .font(.caption)
