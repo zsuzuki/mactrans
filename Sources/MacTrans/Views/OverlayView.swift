@@ -142,13 +142,14 @@ private struct TranscriptSegmentView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(segment.sourceText)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(Color(red: 0.66, green: 0.74, blue: 0.82))
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             Text(translationText)
                 .font(.system(size: 14))
-                .foregroundStyle(segment.state == .failed ? .red : .primary)
+                .foregroundStyle(translationForeground)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -160,5 +161,15 @@ private struct TranscriptSegmentView: View {
             return segment.errorMessage ?? "..."
         }
         return segment.translatedText.isEmpty ? "..." : segment.translatedText
+    }
+
+    private var translationForeground: Color {
+        if segment.state == .failed {
+            return .red
+        }
+        if translationText == "..." {
+            return Color(red: 0.74, green: 0.79, blue: 0.84)
+        }
+        return Color(red: 0.94, green: 0.96, blue: 0.98)
     }
 }
