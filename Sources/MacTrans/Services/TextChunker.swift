@@ -29,6 +29,14 @@ struct TextChunker {
             case .stable: 1.4
             }
         }
+
+        var overlapMinimumNormalizedCharacters: Int {
+            switch self {
+            case .fast: 12
+            case .balanced: 8
+            case .stable: 6
+            }
+        }
     }
 
     var timeoutSeconds: Double
@@ -220,9 +228,8 @@ struct TextChunker {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        let overlap = suffixPrefixOverlap(committed: normalizedCommitted, candidate: candidate)
-        if overlap > 0 {
-            return String(candidate.dropFirst(overlap))
+        if let overlapEnd = normalizedOverlapEndIndex(committed: normalizedCommitted, candidate: candidate) {
+            return String(candidate[overlapEnd...])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
@@ -241,24 +248,48 @@ struct TextChunker {
         return trimmed
     }
 
-    private func suffixPrefixOverlap(committed: String, candidate: String) -> Int {
-        let maxLength = min(committed.count, candidate.count)
-        guard maxLength >= 12 else { return 0 }
+    private func normalizedOverlapEndIndex(committed: String, candidate: String) -> String.Index? {
+        let committedCharacters = normalizedCharacters(committed)
+        let candidateEntries = normalizedCharactersWithEndIndex(candidate)
+        let maxLength = min(committedCharacters.count, candidateEntries.count)
+        let minimumLength = min(mode.overlapMinimumNormalizedCharacters, maxLength)
+        guard minimumLength > 0 else { return nil }
 
-        for length in stride(from: maxLength, through: 12, by: -1) {
-            let committedSuffix = String(committed.suffix(length))
-            let candidatePrefix = String(candidate.prefix(length))
-            if normalizedForOverlap(committedSuffix) == normalizedForOverlap(candidatePrefix) {
-                return length
+        for length in stride(from: maxLength, through: minimumLength, by: -1) {
+            let committedSuffix = committedCharacters.suffix(length)
+            let candidatePrefix = candidateEntries.prefix(length).map(\.character)
+            if Array(committedSuffix) == candidatePrefix {
+                return candidateEntries[length - 1].endIndex
             }
         }
-        return 0
+
+        return nil
     }
 
     private func normalizedForOverlap(_ value: String) -> String {
         value
             .lowercased()
             .filter { !$0.isPunctuation && !$0.isWhitespace }
+    }
+
+    private func normalizedCharacters(_ value: String) -> [Character] {
+        Array(normalizedForOverlap(value))
+    }
+
+    private func normalizedCharactersWithEndIndex(_ value: String) -> [(character: Character, endIndex: String.Index)] {
+        var output: [(character: Character, endIndex: String.Index)] = []
+        var index = value.startIndex
+
+        while index < value.endIndex {
+            let nextIndex = value.index(after: index)
+            let normalized = String(value[index]).lowercased()
+            for character in normalized where !character.isPunctuation && !character.isWhitespace {
+                output.append((character, nextIndex))
+            }
+            index = nextIndex
+        }
+
+        return output
     }
 
     private func isPublishable(_ text: String) -> Bool {

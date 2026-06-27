@@ -184,7 +184,7 @@ final class AppModel: ObservableObject {
     }
 
     private func enqueueTranslation(sourceText: String) {
-        let id = transcriptStore.appendPending(sourceText: sourceText)
+        let id = transcriptStore.appendPendingReplacingRecentRevision(sourceText: sourceText)
         let previous = translationTail
         let baseURLString = preferences.lmStudioBaseURL
         let model = preferences.lmStudioModel
