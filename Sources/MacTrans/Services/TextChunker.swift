@@ -54,11 +54,25 @@ struct TextChunker {
         let trimmed = uncommittedText(from: text.trimmingCharacters(in: .whitespacesAndNewlines))
         guard !trimmed.isEmpty else { return nil }
 
+        let previousPending = pendingText
         if pendingText.isEmpty {
             pendingFirstSeen = Date()
         }
-        pendingText = trimmed
         lastUpdate = Date()
+
+        if let stablePrefix = stableCommitPrefix(previous: previousPending, current: trimmed) {
+            let remainder = String(trimmed.dropFirst(stablePrefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            pendingText = remainder
+            pendingFirstSeen = Date()
+            lastCandidateText = remainder
+            stableCandidateCount = remainder.isEmpty ? 0 : 1
+            if let chunk = commit(stablePrefix) {
+                return chunk
+            }
+        }
+
+        pendingText = trimmed
         if trimmed == lastCandidateText {
             stableCandidateCount += 1
         } else {
@@ -116,6 +130,74 @@ struct TextChunker {
         let punctuation = CharacterSet(charactersIn: ".?!。！？")
         guard let lastScalar = text.unicodeScalars.last else { return false }
         return punctuation.contains(lastScalar) && Date().timeIntervalSince(pendingFirstSeen) >= mode.punctuationMinimumAge
+    }
+
+    private func stableCommitPrefix(previous: String, current: String) -> String? {
+        guard !previous.isEmpty else { return nil }
+        guard Date().timeIntervalSince(pendingFirstSeen) >= mode.punctuationMinimumAge else { return nil }
+
+        let common = commonPrefix(previous, current)
+        guard common.count >= 12 else { return nil }
+
+        if let sentence = lastPrefixEndingWithSentencePunctuation(in: common) {
+            let remainder = String(current.dropFirst(sentence.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !remainder.isEmpty {
+                return sentence
+            }
+        }
+
+        if common.count >= max(80, maxChunkSoftBoundary) {
+            return lastPrefixEndingAtWordBoundary(in: common)
+        }
+
+        return nil
+    }
+
+    private var maxChunkSoftBoundary: Int {
+        max(60, Int(Double(maxCharacters) * 0.65))
+    }
+
+    private func commonPrefix(_ left: String, _ right: String) -> String {
+        var leftIndex = left.startIndex
+        var rightIndex = right.startIndex
+
+        while leftIndex < left.endIndex, rightIndex < right.endIndex {
+            guard left[leftIndex] == right[rightIndex] else { break }
+            leftIndex = left.index(after: leftIndex)
+            rightIndex = right.index(after: rightIndex)
+        }
+
+        return String(left[..<leftIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func lastPrefixEndingWithSentencePunctuation(in text: String) -> String? {
+        let punctuation: Set<Character> = [".", "?", "!", "。", "？", "！"]
+        var bestEnd: String.Index?
+
+        for index in text.indices where punctuation.contains(text[index]) {
+            bestEnd = text.index(after: index)
+        }
+
+        guard let bestEnd else { return nil }
+        let prefix = String(text[..<bestEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return prefix.count >= 12 ? prefix : nil
+    }
+
+    private func lastPrefixEndingAtWordBoundary(in text: String) -> String? {
+        var bestEnd: String.Index?
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            if text[index].isWhitespace {
+                bestEnd = index
+            }
+            index = text.index(after: index)
+        }
+
+        guard let bestEnd else { return nil }
+        let prefix = String(text[..<bestEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return prefix.count >= maxChunkSoftBoundary ? prefix : nil
     }
 
     private func isStableEnough(_ text: String) -> Bool {
