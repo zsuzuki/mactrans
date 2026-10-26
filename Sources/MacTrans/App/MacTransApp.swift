@@ -8,12 +8,12 @@ struct MacTransApp: App {
 
     var body: some Scene {
         MenuBarExtra("MacTrans", systemImage: model.isRecording ? "waveform.circle.fill" : "captions.bubble") {
-            MenuBarView(model: model)
+            MenuBarView(model: model, preferences: model.preferences)
         }
         .menuBarExtraStyle(.menu)
 
         Settings {
-            SettingsView(preferences: model.preferences)
+            SettingsView(model: model, preferences: model.preferences)
                 .frame(width: 520)
         }
     }

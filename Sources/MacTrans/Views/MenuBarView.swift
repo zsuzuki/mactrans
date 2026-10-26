@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MenuBarView: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var preferences: AppPreferences
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -16,6 +17,13 @@ struct MenuBarView: View {
             }
 
             Divider()
+
+            Picker("Audio Input", selection: $preferences.audioInputSource) {
+                ForEach(AudioInputSource.allCases) { source in
+                    Text(source.title).tag(source)
+                }
+            }
+            .disabled(!model.canChangeAudioSource)
 
             Picker("Source", selection: sourceLanguageBinding) {
                 Text("English").tag("English")
@@ -49,6 +57,7 @@ struct MenuBarView: View {
                 model.toggleRecording()
             }
             .keyboardShortcut("r")
+            .disabled(model.isStarting || model.isFinishing)
 
             Button(model.isOverlayVisible ? "Hide Overlay" : "Show Overlay") {
                 model.toggleOverlay()

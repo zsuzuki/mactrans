@@ -26,6 +26,7 @@ BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_MACOS" "$APP_FRAMEWORKS"
 cp "$BUILD_BINARY" "$APP_BINARY"
+cp -R "$(dirname "$BUILD_BINARY")/MacTrans_MacTrans.bundle" "$APP_BUNDLE/"
 chmod +x "$APP_BINARY"
 
 cp "$WHISPER_BUILD/src"/libwhisper*.dylib "$APP_FRAMEWORKS/"

@@ -1,56 +1,50 @@
 import Foundation
 
+/// Times are absolute sample offsets in the session's 16 kHz audio stream.
+struct TimedWord: Equatable, Sendable {
+    var text: String
+    var startSample: Int64
+    var endSample: Int64
+
+    var normalized: String {
+        text.lowercased().filter { !$0.isPunctuation && !$0.isWhitespace }
+    }
+
+    var midpoint: Int64 { startSample + (endSample - startSample) / 2 }
+}
+
+struct TranscriptionUpdate: Sendable {
+    var committed: [String] = []
+    var partialText: String = ""
+}
+
+/// Confirms only stable prefixes or a completed speech interval. Wall-clock
+/// time never commits a hypothesis: all decisions use captured audio time.
 struct TextChunker {
-    enum Mode: String {
-        case fast
-        case balanced
-        case stable
+    enum Mode: String, Sendable {
+        case fast, balanced, stable
 
-        var stableCandidateThreshold: Int {
+        var confirmations: Int { self == .stable ? 3 : 2 }
+        var silenceSeconds: Double {
             switch self {
-            case .fast: 1
-            case .balanced: 2
-            case .stable: 3
+            case .fast: 0.45
+            case .balanced: 0.7
+            case .stable: 1.0
             }
         }
-
-        var timeoutMultiplier: Double {
-            switch self {
-            case .fast: 0.75
-            case .balanced: 1.0
-            case .stable: 1.55
-            }
-        }
-
-        var punctuationMinimumAge: Double {
-            switch self {
-            case .fast: 0.35
-            case .balanced: 0.9
-            case .stable: 1.4
-            }
-        }
-
-        var overlapMinimumNormalizedCharacters: Int {
-            switch self {
-            case .fast: 12
-            case .balanced: 8
-            case .stable: 6
-            }
-        }
+        var timeoutMultiplier: Double { self == .stable ? 1.55 : (self == .fast ? 0.75 : 1) }
+        var edgeSamples: Int64 { self == .stable ? 9_600 : 6_400 }
     }
 
     var timeoutSeconds: Double
     var maxCharacters: Int
     var mode: Mode
-
-    private var pendingText = ""
-    private var pendingFirstSeen = Date()
-    private var committedText = ""
-    private var lastCandidateText = ""
-    private var stableCandidateCount = 0
-    private var lastUpdate = Date()
-    private var lastCommittedShortText = ""
-    private var repeatedShortCommitCount = 0
+    private(set) var committedThrough: Int64 = 0
+    private var previous: [TimedWord] = []
+    private var confirmations: [Int] = []
+    private var lastAudioEnd: Int64 = -1
+    private var partialText = ""
+    private var committedTail: [TimedWord] = []
 
     init(timeoutSeconds: Double, maxCharacters: Int, mode: Mode = .balanced) {
         self.timeoutSeconds = timeoutSeconds
@@ -58,267 +52,116 @@ struct TextChunker {
         self.mode = mode
     }
 
-    mutating func accept(_ text: String, isFinal: Bool) -> String? {
-        let trimmed = uncommittedText(from: text.trimmingCharacters(in: .whitespacesAndNewlines))
-        guard !trimmed.isEmpty else { return nil }
-
-        let previousPending = pendingText
-        if pendingText.isEmpty {
-            pendingFirstSeen = Date()
+    mutating func accept(_ words: [TimedWord], audioEnd: Int64, isFinal: Bool,
+                         forceBoundary: Bool = false) -> TranscriptionUpdate {
+        guard audioEnd >= lastAudioEnd, audioEnd > committedThrough else {
+            return TranscriptionUpdate(partialText: partialText)
         }
-        lastUpdate = Date()
-
-        if let stablePrefix = stableCommitPrefix(previous: previousPending, current: trimmed) {
-            let remainder = String(trimmed.dropFirst(stablePrefix.count))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            pendingText = remainder
-            pendingFirstSeen = Date()
-            lastCandidateText = remainder
-            stableCandidateCount = remainder.isEmpty ? 0 : 1
-            if let chunk = commit(stablePrefix) {
-                return chunk
-            }
+        // Re-decoding the same audio does not count as independent agreement.
+        guard audioEnd > lastAudioEnd || isFinal else {
+            return TranscriptionUpdate(partialText: partialText)
+        }
+        lastAudioEnd = audioEnd
+        let candidates = words.dropFirst(confirmedPrefixCount(in: words)).filter {
+            $0.endSample > committedThrough && $0.midpoint >= committedThrough &&
+            $0.startSample >= 0 && $0.endSample >= $0.startSample && $0.endSample <= audioEnd
+        }
+        var counts = [Int](repeating: 1, count: candidates.count)
+        for index in 0..<min(candidates.count, previous.count) {
+            // Text agreement must refer to the same audio, not a later repetition.
+            guard candidates[index].normalized == previous[index].normalized,
+                  abs(candidates[index].midpoint - previous[index].midpoint) <= 8_000 else { break }
+            counts[index] = confirmations[index] + 1
         }
 
-        pendingText = trimmed
-        if trimmed == lastCandidateText {
-            stableCandidateCount += 1
+        var commitCount = 0
+        if isFinal {
+            commitCount = candidates.count
         } else {
-            lastCandidateText = trimmed
-            stableCandidateCount = 1
-        }
-
-        if isFinal || shouldFlush(trimmed) {
-            guard isFinal || isStableEnough(trimmed) else {
-                return nil
+            var stableCount = 0
+            // The newest word can still be incomplete, even when its text repeats.
+            for index in candidates.indices {
+                guard index < candidates.count - 1,
+                      counts[index] >= mode.confirmations,
+                      candidates[index].endSample <= audioEnd - mode.edgeSamples else { break }
+                stableCount += 1
             }
-            return completePending()
-        }
-        return nil
-    }
-
-    mutating func flushIfTimedOut(now: Date = Date()) -> String? {
-        guard !pendingText.isEmpty else { return nil }
-        guard now.timeIntervalSince(pendingFirstSeen) >= timeoutSeconds * mode.timeoutMultiplier else { return nil }
-        return flush()
-    }
-
-    mutating func clear() {
-        pendingText = ""
-        pendingFirstSeen = Date()
-        committedText = ""
-        lastCandidateText = ""
-        stableCandidateCount = 0
-        lastUpdate = Date()
-        lastCommittedShortText = ""
-        repeatedShortCommitCount = 0
-    }
-
-    private mutating func completePending() -> String? {
-        let candidate = pendingText.trimmingCharacters(in: .whitespacesAndNewlines)
-        pendingText = ""
-        guard !candidate.isEmpty else { return nil }
-        return commit(candidate)
-    }
-
-    private mutating func flush() -> String? {
-        let output = pendingText.trimmingCharacters(in: .whitespacesAndNewlines)
-        pendingText = ""
-        pendingFirstSeen = Date()
-        lastCandidateText = ""
-        stableCandidateCount = 0
-        return commit(output)
-    }
-
-    private func shouldFlush(_ text: String) -> Bool {
-        if text.count >= maxCharacters {
-            return true
-        }
-
-        let punctuation = CharacterSet(charactersIn: ".?!。！？")
-        guard let lastScalar = text.unicodeScalars.last else { return false }
-        return punctuation.contains(lastScalar) && Date().timeIntervalSince(pendingFirstSeen) >= mode.punctuationMinimumAge
-    }
-
-    private func stableCommitPrefix(previous: String, current: String) -> String? {
-        guard !previous.isEmpty else { return nil }
-        guard Date().timeIntervalSince(pendingFirstSeen) >= mode.punctuationMinimumAge else { return nil }
-
-        let common = commonPrefix(previous, current)
-        guard common.count >= 12 else { return nil }
-
-        if let sentence = lastPrefixEndingWithSentencePunctuation(in: common) {
-            let remainder = String(current.dropFirst(sentence.count))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !remainder.isEmpty {
-                return sentence
+            for index in 0..<stableCount where endsSentence(candidates[index].text) {
+                commitCount = index + 1
+            }
+            let stable = Array(candidates.prefix(stableCount))
+            let stableText = Self.text(stable)
+            let age = candidates.first.map { Double(audioEnd - $0.startSample) / 16_000 } ?? 0
+            // Long speech can advance at a stable word boundary, but a timeout
+            // alone must never publish an unstable tail or a short fragment.
+            if commitCount == 0 && (stableText.count >= maxCharacters ||
+                (stableText.count >= max(60, maxCharacters * 2 / 3) &&
+                 age >= timeoutSeconds * mode.timeoutMultiplier)) {
+                commitCount = stableCount
+            }
+            if forceBoundary && commitCount == 0 {
+                // Bounded audio buffer: leave the last 800 ms for the next decode.
+                commitCount = candidates.prefix { $0.endSample <= audioEnd - 12_800 }.count
             }
         }
 
-        if common.count >= max(80, maxChunkSoftBoundary) {
-            return lastPrefixEndingAtWordBoundary(in: common)
+        let committedWords = Array(candidates.prefix(commitCount))
+        let text = Self.text(committedWords)
+        if let end = committedWords.last?.endSample {
+            committedThrough = max(committedThrough, end)
+            committedTail = Array((committedTail + committedWords).suffix(16))
         }
-
-        return nil
-    }
-
-    private var maxChunkSoftBoundary: Int {
-        max(60, Int(Double(maxCharacters) * 0.65))
-    }
-
-    private func commonPrefix(_ left: String, _ right: String) -> String {
-        var leftIndex = left.startIndex
-        var rightIndex = right.startIndex
-
-        while leftIndex < left.endIndex, rightIndex < right.endIndex {
-            guard left[leftIndex] == right[rightIndex] else { break }
-            leftIndex = left.index(after: leftIndex)
-            rightIndex = right.index(after: rightIndex)
+        previous = Array(candidates.dropFirst(commitCount))
+        confirmations = Array(counts.dropFirst(commitCount))
+        partialText = Self.text(previous)
+        if isFinal {
+            // Consume the entire completed interval, including silence. A future
+            // utterance with identical wording is still a new audio interval.
+            committedThrough = max(committedThrough, audioEnd)
+            previous.removeAll()
+            confirmations.removeAll()
+            partialText = ""
         }
-
-        return String(left[..<leftIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return TranscriptionUpdate(committed: text.isEmpty ? [] : [text], partialText: partialText)
     }
 
-    private func lastPrefixEndingWithSentencePunctuation(in text: String) -> String? {
-        let punctuation: Set<Character> = [".", "?", "!", "。", "？", "！"]
-        var bestEnd: String.Index?
-
-        for index in text.indices where punctuation.contains(text[index]) {
-            bestEnd = text.index(after: index)
-        }
-
-        guard let bestEnd else { return nil }
-        let prefix = String(text[..<bestEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
-        return prefix.count >= 12 ? prefix : nil
+    private static func text(_ words: [TimedWord]) -> String {
+        words.map(\.text).joined().trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func lastPrefixEndingAtWordBoundary(in text: String) -> String? {
-        var bestEnd: String.Index?
-        var index = text.startIndex
-
-        while index < text.endIndex {
-            if text[index].isWhitespace {
-                bestEnd = index
+    private func confirmedPrefixCount(in words: [TimedWord]) -> Int {
+        // Word timestamps can move between decodes. Anchor a repeated suffix
+        // of at least two confirmed words to the same audio interval before
+        // applying the time cutoff. Never match speech starting after it.
+        guard committedTail.count >= 2 else { return 0 }
+        var bestCount = 0
+        var bestLength = 1
+        var bestDistance = Int64.max
+        for end in words.indices {
+            var length = 0
+            var distance: Int64 = 0
+            while length <= end && length < committedTail.count {
+                let word = words[end - length]
+                let confirmed = committedTail[committedTail.count - 1 - length]
+                let delta = abs(word.midpoint - confirmed.midpoint)
+                guard word.normalized == confirmed.normalized, delta <= 8_000 else { break }
+                distance += delta
+                length += 1
             }
-            index = text.index(after: index)
-        }
-
-        guard let bestEnd else { return nil }
-        let prefix = String(text[..<bestEnd]).trimmingCharacters(in: .whitespacesAndNewlines)
-        return prefix.count >= maxChunkSoftBoundary ? prefix : nil
-    }
-
-    private func isStableEnough(_ text: String) -> Bool {
-        if text.count >= maxCharacters {
-            return true
-        }
-        if stableCandidateCount >= mode.stableCandidateThreshold {
-            return true
-        }
-        return Date().timeIntervalSince(pendingFirstSeen) >= max(1.2, timeoutSeconds * mode.timeoutMultiplier)
-    }
-
-    private func uncommittedText(from text: String) -> String {
-        let candidate = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let normalizedCommitted = committedText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedCommitted.isEmpty else { return candidate }
-
-        if candidate.hasPrefix(normalizedCommitted) {
-            return String(candidate.dropFirst(normalizedCommitted.count))
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        if let overlapEnd = normalizedOverlapEndIndex(committed: normalizedCommitted, candidate: candidate) {
-            return String(candidate[overlapEnd...])
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        return candidate
-    }
-
-    private mutating func commit(_ output: String) -> String? {
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-        guard shouldPublish(trimmed) else { return nil }
-
-        committedText = [committedText, trimmed]
-            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-            .joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed
-    }
-
-    private func normalizedOverlapEndIndex(committed: String, candidate: String) -> String.Index? {
-        let committedCharacters = normalizedCharacters(committed)
-        let candidateEntries = normalizedCharactersWithEndIndex(candidate)
-        let maxLength = min(committedCharacters.count, candidateEntries.count)
-        let minimumLength = min(mode.overlapMinimumNormalizedCharacters, maxLength)
-        guard minimumLength > 0 else { return nil }
-
-        for length in stride(from: maxLength, through: minimumLength, by: -1) {
-            let committedSuffix = committedCharacters.suffix(length)
-            let candidatePrefix = candidateEntries.prefix(length).map(\.character)
-            if Array(committedSuffix) == candidatePrefix {
-                return candidateEntries[length - 1].endIndex
+            guard length >= 2, words[end - length + 1].startSample < committedThrough else { continue }
+            if length > bestLength || (length == bestLength && distance < bestDistance) {
+                bestLength = length
+                bestDistance = distance
+                bestCount = end + 1
             }
         }
-
-        return nil
+        return bestCount
     }
 
-    private func normalizedForOverlap(_ value: String) -> String {
-        value
-            .lowercased()
-            .filter { !$0.isPunctuation && !$0.isWhitespace }
-    }
-
-    private func normalizedCharacters(_ value: String) -> [Character] {
-        Array(normalizedForOverlap(value))
-    }
-
-    private func normalizedCharactersWithEndIndex(_ value: String) -> [(character: Character, endIndex: String.Index)] {
-        var output: [(character: Character, endIndex: String.Index)] = []
-        var index = value.startIndex
-
-        while index < value.endIndex {
-            let nextIndex = value.index(after: index)
-            let normalized = String(value[index]).lowercased()
-            for character in normalized where !character.isPunctuation && !character.isWhitespace {
-                output.append((character, nextIndex))
-            }
-            index = nextIndex
-        }
-
-        return output
-    }
-
-    private func isPublishable(_ text: String) -> Bool {
-        text.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
-    }
-
-    private mutating func shouldPublish(_ text: String) -> Bool {
-        guard isPublishable(text) else { return false }
-
-        if isVeryShort(text) {
-            let normalized = normalizedForOverlap(text)
-            if normalized == lastCommittedShortText {
-                repeatedShortCommitCount += 1
-            } else {
-                lastCommittedShortText = normalized
-                repeatedShortCommitCount = 1
-            }
-            return repeatedShortCommitCount <= 2
-        }
-
-        lastCommittedShortText = ""
-        repeatedShortCommitCount = 0
-        return true
-    }
-
-    private func isVeryShort(_ text: String) -> Bool {
-        let words = text
-            .split { $0.isWhitespace || $0.isPunctuation }
-            .filter { !$0.isEmpty }
-        return words.count <= 1 && text.count <= 12
+    private func endsSentence(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let last = trimmed.last, ".?!。！？".contains(last) else { return false }
+        let abbreviations: Set<String> = ["mr.", "mrs.", "ms.", "dr.", "prof.", "e.g.", "i.e."]
+        return !abbreviations.contains(trimmed.lowercased())
     }
 }

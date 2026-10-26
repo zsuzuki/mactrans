@@ -2,6 +2,10 @@ import Foundation
 
 @MainActor
 final class AppPreferences: ObservableObject {
+    @Published var audioInputSource: AudioInputSource {
+        didSet { defaults.set(audioInputSource.rawValue, forKey: Keys.audioInputSource) }
+    }
+
     @Published var sourceLanguage: String {
         didSet { defaults.set(sourceLanguage, forKey: Keys.sourceLanguage) }
     }
@@ -46,6 +50,7 @@ final class AppPreferences: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        audioInputSource = AudioInputSource(rawValue: defaults.string(forKey: Keys.audioInputSource) ?? "") ?? .microphone
         sourceLanguage = defaults.string(forKey: Keys.sourceLanguage) ?? "English"
         targetLanguage = defaults.string(forKey: Keys.targetLanguage) ?? "Japanese"
         lmStudioBaseURL = defaults.string(forKey: Keys.lmStudioBaseURL) ?? "http://127.0.0.1:1234/v1/chat/completions"
@@ -64,6 +69,7 @@ final class AppPreferences: ObservableObject {
     }
 
     private enum Keys {
+        static let audioInputSource = "audioInputSource"
         static let sourceLanguage = "sourceLanguage"
         static let targetLanguage = "targetLanguage"
         static let lmStudioBaseURL = "lmStudioBaseURL"

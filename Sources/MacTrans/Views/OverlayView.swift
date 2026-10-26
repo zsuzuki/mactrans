@@ -11,6 +11,11 @@ struct OverlayView: View {
             HStack(spacing: 10) {
                 Text("MacTrans")
                     .font(.headline)
+                if let source = model.activeAudioSource {
+                    Text(source.title)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
                 Button {
                     autoScroll.toggle()
@@ -27,6 +32,7 @@ struct OverlayView: View {
                 }
                 .buttonStyle(.plain)
                 .help(model.isRecording ? "Stop recording" : "Start recording")
+                .disabled(model.isStarting || model.isFinishing)
 
                 Divider()
                     .frame(height: 14)

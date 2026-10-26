@@ -15,64 +15,106 @@ final class AppModel: ObservableObject {
     private let audioCapture = AudioCaptureService()
     private let transcriber = WhisperTranscriber()
     private lazy var overlayController = OverlayWindowController(model: self)
-    private var chunker = TextChunker(timeoutSeconds: 2.8, maxCharacters: 220)
     private var translationTail: Task<Void, Never>?
-    private var timeoutTask: Task<Void, Never>?
+    private var recordingTask: Task<Void, Never>?
+    private var captureContinuation: AsyncThrowingStream<CapturedAudio, Error>.Continuation?
+    @Published private(set) var isStarting = false
+    @Published private(set) var isFinishing = false
+    @Published private(set) var activeAudioSource: AudioInputSource?
+
+    var canChangeAudioSource: Bool { !isStarting && !isRecording && !isFinishing }
+    var recordingStatus: String { "Recording · \((activeAudioSource ?? preferences.audioInputSource).title)" }
 
     func startRecording() {
-        guard !isRecording else { return }
+        guard recordingTask == nil, !isStarting else { return }
+        let source = preferences.audioInputSource
+        isStarting = true
+        statusText = "Starting · \(source.title)"
         showOverlay()
 
         Task {
-            let allowed = await audioCapture.requestPermission()
-            guard allowed else {
-                lastError = AudioCaptureError.microphoneDenied.localizedDescription
-                statusText = "Microphone denied"
-                return
-            }
-
+            defer { isStarting = false }
             do {
                 try await transcriber.configure(
                     modelPath: preferences.whisperModelPath,
-                    sourceLanguage: preferences.sourceLanguage
-                )
-                chunker = TextChunker(
+                    sourceLanguage: preferences.sourceLanguage,
                     timeoutSeconds: preferences.chunkTimeoutSeconds,
                     maxCharacters: preferences.maxChunkCharacters,
                     mode: TextChunker.Mode(rawValue: preferences.chunkingMode) ?? .balanced
                 )
-                try audioCapture.start { [weak self] samples, sampleRate in
-                    Task {
-                        await self?.handle(samples: samples, sampleRate: sampleRate)
+                // One consumer preserves capture order. Bound backlog and report
+                // overload explicitly instead of silently dropping audio.
+                let (stream, continuation) = AsyncThrowingStream<CapturedAudio, Error>.makeStream(
+                    bufferingPolicy: .bufferingOldest(256)
+                )
+                captureContinuation = continuation
+                try await audioCapture.start(source: source) { samples, sampleRate in
+                    if case .dropped = continuation.yield(CapturedAudio(samples: samples, sampleRate: sampleRate)) {
+                        continuation.finish(throwing: AudioCaptureError.processingOverrun)
                     }
+                } onError: { error in
+                    continuation.finish(throwing: error)
                 }
+                activeAudioSource = source
                 isRecording = true
-                statusText = "Recording"
+                statusText = recordingStatus
                 lastError = nil
                 showOverlay()
-                startTimeoutLoop()
+                recordingTask = Task { await consumeAudio(stream) }
             } catch {
+                await audioCapture.stop()
+                captureContinuation?.finish()
+                captureContinuation = nil
+                await transcriber.reset()
                 lastError = error.localizedDescription
                 statusText = "Recording failed"
-                audioCapture.stop()
             }
         }
     }
 
     func stopRecording() {
         guard isRecording else { return }
-        audioCapture.stop()
-        timeoutTask?.cancel()
-        timeoutTask = nil
-        Task {
-            await transcriber.reset()
-        }
-        if let chunk = chunker.flushIfTimedOut(now: Date.distantFuture) {
-            enqueueTranslation(sourceText: chunk)
-        }
-        transcriptStore.removePartial()
         isRecording = false
-        statusText = "Stopped"
+        isFinishing = true
+        statusText = "Finishing transcription"
+        let continuation = captureContinuation
+        Task {
+            await audioCapture.stop()
+            // Wait for the capture callback queue before draining transcription.
+            continuation?.finish()
+        }
+    }
+
+    private func consumeAudio(_ stream: AsyncThrowingStream<CapturedAudio, Error>) async {
+        do {
+            for try await audio in stream {
+                for update in try await transcriber.accept(samples: audio.samples, sampleRate: audio.sampleRate) {
+                    apply(update)
+                }
+            }
+            for update in try await transcriber.finish() { apply(update) }
+            statusText = "Stopped"
+        } catch {
+            lastError = error.localizedDescription
+            statusText = "Transcription failed"
+        }
+        await audioCapture.stop()
+        captureContinuation?.finish()
+        captureContinuation = nil
+        isRecording = false
+        await transcriber.reset()
+        transcriptStore.removePartial()
+        recordingTask = nil
+        activeAudioSource = nil
+        isFinishing = false
+    }
+
+    private func apply(_ update: TranscriptionUpdate) {
+        if !update.committed.isEmpty {
+            transcriptStore.removePartial()
+            for text in update.committed { enqueueTranslation(sourceText: text) }
+        }
+        transcriptStore.updatePartial(update.partialText)
     }
 
     func toggleRecording() {
@@ -118,7 +160,7 @@ final class AppModel: ObservableObject {
 
     func clearTranscript() {
         transcriptStore.resetSession()
-        statusText = isRecording ? "Recording" : "Ready"
+        statusText = isRecording ? recordingStatus : "Ready"
     }
 
     func saveTranscript() {
@@ -165,26 +207,8 @@ final class AppModel: ObservableObject {
         return URL(fileURLWithPath: path).lastPathComponent
     }
 
-    private func handle(samples: [Float], sampleRate: Double) async {
-        do {
-            guard let update = try await transcriber.accept(samples: samples, sampleRate: sampleRate) else {
-                return
-            }
-
-            if let chunk = chunker.accept(update.text, isFinal: update.isFinal) {
-                transcriptStore.removePartial()
-                enqueueTranslation(sourceText: chunk)
-            } else {
-                transcriptStore.updatePartial(update.text)
-            }
-        } catch {
-            statusText = "Transcription failed"
-            lastError = error.localizedDescription
-        }
-    }
-
     private func enqueueTranslation(sourceText: String) {
-        let id = transcriptStore.appendPendingReplacingRecentRevision(sourceText: sourceText)
+        let id = transcriptStore.appendPending(sourceText: sourceText)
         let previous = translationTail
         let baseURLString = preferences.lmStudioBaseURL
         let model = preferences.lmStudioModel
@@ -208,7 +232,7 @@ final class AppModel: ObservableObject {
                 let translated = try await client.translate(sourceText)
                 await MainActor.run {
                     self.transcriptStore.markTranslated(id: id, translatedText: translated)
-                    self.statusText = self.isRecording ? "Recording" : "Ready"
+                    self.statusText = self.isRecording ? self.recordingStatus : (self.recordingTask == nil ? "Ready" : "Finishing transcription")
                     self.lastError = nil
                 }
             } catch {
@@ -220,19 +244,9 @@ final class AppModel: ObservableObject {
             }
         }
     }
+}
 
-    private func startTimeoutLoop() {
-        timeoutTask?.cancel()
-        timeoutTask = Task {
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(400))
-                await MainActor.run {
-                    if let chunk = self.chunker.flushIfTimedOut() {
-                        self.transcriptStore.removePartial()
-                        self.enqueueTranslation(sourceText: chunk)
-                    }
-                }
-            }
-        }
-    }
+private struct CapturedAudio: Sendable {
+    var samples: [Float]
+    var sampleRate: Double
 }
