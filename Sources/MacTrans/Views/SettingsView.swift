@@ -39,6 +39,8 @@ struct SettingsView: View {
                 }
             }
 
+            SpeechSettingsView(model: model, preferences: preferences, speech: model.speech)
+
             Section("whisper.cpp") {
                 HStack {
                     TextField("Model path", text: $preferences.whisperModelPath)

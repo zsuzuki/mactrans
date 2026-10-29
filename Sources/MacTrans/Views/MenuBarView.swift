@@ -74,6 +74,10 @@ struct MenuBarView: View {
 
             Divider()
 
+            SpeechMenuView(model: model, preferences: preferences, speech: model.speech)
+
+            Divider()
+
             SettingsLink {
                 Text("Settings...")
             }

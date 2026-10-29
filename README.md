@@ -14,11 +14,13 @@ MacTrans は、macOS 専用の準リアルタイム翻訳アプリです。メ�
 - セッション中の原文/翻訳文を一時ファイルへ保存
 - `Save Transcript...` でテキストファイルとして書き出し
 - LM Studio API token は Keychain に保存
+- Gemini TTS で翻訳結果を順番に読み上げ（任意）
 
 ## 必要環境
 
 - macOS 14+
 - Xcode Command Line Tools
+- Keychainに登録済みのApple Development署名証明書（録音権限をビルド間で保持するため）
 - ビルド済みの `whisper.cpp`（ストリーミングVAD APIに対応した v1.8.6 で検証）
 - `whisper.cpp` 用の GGML モデルファイル
 - LM Studio のローカルサーバー
@@ -50,6 +52,12 @@ WHISPER_CPP_DIR=/path/to/whisper.cpp ./script/build_and_run.sh
 ```
 
 `--verify` はアプリをビルドして `.app` バンドルへ配置し、プロセスが起動するところまで確認します。
+
+ビルド時には同梱dylib・リソース・アプリ本体をApple Development証明書で署名し、署名検証後に `dist/MacTrans.app` を更新します。証明書が1つだけなら自動選択します。複数ある場合や別の署名証明書を使う場合は `MACTRANS_SIGNING_IDENTITY` に証明書名またはSHA-1を指定してください。証明書が見つからない場合は停止し、アドホック署名への切り替えは行いません。
+
+以前のビルドは実行ファイルのアドホック署名をそのまま使っていたため、更新ごとにmacOSが照合する署名要件が変わっていました。証明書署名への切り替え後、録音権限がオンなのに許可を求められる場合は、一度MacTransを終了し、「画面収録とシステムオーディオ録音」のMacTransをオフ→オンにしてから `dist/MacTrans.app` を開き直してください。改善しない場合は古いMacTransの項目を削除し、現在のアプリを追加して許可します。これは署名の切り替え時の再登録で、ビルドごとの操作ではありません。権限の保持には今後も同じ開発チームとBundle IDを使います。[Appleの説明](https://developer.apple.com/forums/thread/819406)
+
+オン／オフでも古い署名の照合情報が残る場合は、MacTransを終了して `tccutil reset ScreenCapture dev.local.MacTrans` を実行し、現在のアプリを開き直してmacOS画面で許可し直します。このコマンドはMacTransの画面収録許可だけをリセットし、自動で許可を付与するものではありません。通常のビルドでは実行しません。
 
 ## 初期設定
 
@@ -85,6 +93,26 @@ macOS 14対応のためディスプレイを指定したScreenCaptureKitスト�
 - `Model path`: `ggml-large-v3-turbo.bin` などの `whisper.cpp` モデルファイルを指定
 
 メニューバーにも `Choose Whisper Model...` があり、設定画面を開かずにモデルを選べます。
+
+### Gemini Text-to-Speech
+
+Settings の `Gemini Text-to-Speech` で設定します。
+
+- `API key`: CLIで使っているGemini APIキー。macOS Keychainに保存します。以前の画面で入力したキーはそのまま引き継ぎます。
+- `Model`: 初期値はCLIと同じ `gemini-3.8-flash-tts`。自由入力です。
+- `Voice ID / name`: 保存済みの `voice_...` ID、または `Kore` などの音声名。以前に入力した音声IDを引き継ぎます。空欄はエラーになります。
+- `Test text` / `Test Speech`: 任意の短い文章でAPI接続と再生を確認します。自動読み上げがオフでも使えます。
+- `Speak translations`: オンにした後に確定した発話の翻訳結果を自動で読み上げます。初期値はオフです。
+
+言語は翻訳テキストから判定されるため、TTS用の言語コード指定はありません。翻訳先を変更してもモデルと音声は自動変更しません。モデル・音声・言語の対応は利用者が選び、アプリでは組み合わせを制限しません。
+
+翻訳テキストをGemini APIへ送信し、APIの利用料金が発生する場合があります。音声ファイルはメモリ上で再生し、ディスクには保存しません。接続先は [Gemini TTSのInteractions API](https://ai.google.dev/gemini-api/docs/speech-generation) (`https://generativelanguage.googleapis.com/v1beta/interactions`) に固定しています。CLIと同じリクエスト形式で `store: false`、`stream: false`、WAV出力を指定します。Cloud Text-to-Speechの `text:synthesize` APIとは異なります。
+
+メニューバーで自動読み上げのオン／オフを切り替えられます。`Stop Speech`、またはオーバーレイのスピーカー停止アイコンで、再生と待機中の読み上げを止めます。その時点で翻訳処理中だった文章も読み上げません。自動読み上げがオンなら、それ以降に確定する新しい発話から再開します。`Clear Transcript` でも読み上げを停止します。録音の停止時は末尾の翻訳・読み上げを続けます。
+
+読み上げは翻訳処理と別のキューで順番に実行します。最大20件まで保持し、上限を超えた新しい翻訳は読み上げを省略してメニューバーと設定画面に通知します。API／再生エラー時は読み上げキューをクリアし、翻訳表示は続けます。長い翻訳はアプリ側でUTF-8の5,000バイトごとに分割します。この値はGemini APIの上限を表すものではありません。
+
+System Audio入力ではMacTrans自身の再生音声をキャプチャ対象から除外します。Microphone入力ではスピーカーからの読み上げをマイクが拾うため、ヘッドホンを使ってください。
 
 ### Chunking
 
@@ -140,6 +168,8 @@ swift test
 ```
 
 確定部分の再表示、認識の修正、タイムスタンプの揺れ、実際の繰り返し発話、無音、短い間、長い発話、44.1/48 kHzからの連続変換、システム音声のステレオ/モノラル変換を検証します。自動テストはmacOSの録音権限や実際の他アプリの再生音声の取得を検証するものではありません。
+
+TTSのテストではHTTPレスポンスと再生処理を差し替え、リクエスト形式、UTF-8の分割、エラー処理、再生順序、停止後の遅延レスポンス破棄、キュー上限を確認します。実APIの認証・課金・音声の聞こえ方は `Test Speech` で別途確認します。保存済みのMacTrans設定を使って実APIから再生可能なWAVを取得するテストは `MACTRANS_TEST_GEMINI_TTS=1 swift test --filter GeminiTTSIntegrationTests` で実行できます（短いテスト文1件を送信し、通常のAPI利用料金が適用されます）。
 
 現在のモデルを使った録音済み英語音声のテストも実行できます。マイクやLM Studioは使いません。`jfk.wav` を2回入力し、それぞれが一度ずつ確定することと停止時の末尾処理を確認します。
 

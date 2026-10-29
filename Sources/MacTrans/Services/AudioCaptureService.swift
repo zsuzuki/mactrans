@@ -18,7 +18,7 @@ enum AudioCaptureError: LocalizedError {
         case .processingOverrun:
             "Transcription could not keep up with the audio input. Recording stopped; try closing other GPU-heavy apps."
         case .systemAudioDenied:
-            "Allow MacTrans in System Settings > Privacy & Security > Screen & System Audio Recording, then restart MacTrans if macOS asks."
+            "Allow MacTrans in System Settings > Privacy & Security > Screen & System Audio Recording, then quit and reopen MacTrans. If it is already enabled after an app update, turn it off and on again; if needed, remove the old entry and add the current MacTrans.app."
         case .displayUnavailable:
             "No display is available for system audio capture."
         case .unsupportedAudioFormat:

@@ -46,6 +46,26 @@ final class AppPreferences: ObservableObject {
         didSet { defaults.set(chunkingMode, forKey: Keys.chunkingMode) }
     }
 
+    @Published var speechEnabled: Bool {
+        didSet { defaults.set(speechEnabled, forKey: Keys.speechEnabled) }
+    }
+
+    @Published var googleTTSAPIKey: String {
+        didSet { KeychainService.save(googleTTSAPIKey, account: "googleTTSAPIKey") }
+    }
+
+    @Published var speechModel: String {
+        didSet { defaults.set(speechModel, forKey: Keys.speechModel) }
+    }
+
+    @Published var speechVoiceName: String {
+        didSet { defaults.set(speechVoiceName, forKey: Keys.speechVoiceName) }
+    }
+
+    var speechConfiguration: SpeechConfiguration {
+        SpeechConfiguration(apiKey: googleTTSAPIKey, model: speechModel, voiceName: speechVoiceName)
+    }
+
     private let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
@@ -66,6 +86,11 @@ final class AppPreferences: ObservableObject {
         maxChunkCharacters = savedMaxCharacters > 0 ? savedMaxCharacters : 220
 
         chunkingMode = defaults.string(forKey: Keys.chunkingMode) ?? "balanced"
+        speechEnabled = defaults.bool(forKey: Keys.speechEnabled)
+        // Keep the original account name so the entered key survives the API fix.
+        googleTTSAPIKey = KeychainService.read(account: "googleTTSAPIKey")
+        speechModel = defaults.string(forKey: Keys.speechModel) ?? "gemini-3.8-flash-tts"
+        speechVoiceName = defaults.string(forKey: Keys.speechVoiceName) ?? "Kore"
     }
 
     private enum Keys {
@@ -80,6 +105,9 @@ final class AppPreferences: ObservableObject {
         static let chunkTimeoutSeconds = "chunkTimeoutSeconds"
         static let maxChunkCharacters = "maxChunkCharacters"
         static let chunkingMode = "chunkingMode"
+        static let speechEnabled = "speechEnabled"
+        static let speechModel = "speechModel"
+        static let speechVoiceName = "speechVoiceName"
     }
 
     private enum KeychainAccounts {

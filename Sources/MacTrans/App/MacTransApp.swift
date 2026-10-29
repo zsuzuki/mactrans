@@ -14,7 +14,7 @@ struct MacTransApp: App {
 
         Settings {
             SettingsView(model: model, preferences: model.preferences)
-                .frame(width: 520)
+                .frame(width: 560, height: 740)
         }
     }
 }

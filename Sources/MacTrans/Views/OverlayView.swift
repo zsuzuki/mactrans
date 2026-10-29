@@ -18,6 +18,14 @@ struct OverlayView: View {
                 }
                 Spacer()
                 Button {
+                    model.stopSpeech()
+                } label: {
+                    Image(systemName: "speaker.slash")
+                }
+                .buttonStyle(.plain)
+                .help("Stop speech and clear pending speech")
+
+                Button {
                     autoScroll.toggle()
                 } label: {
                     Image(systemName: autoScroll ? "arrow.down.circle.fill" : "arrow.down.circle")

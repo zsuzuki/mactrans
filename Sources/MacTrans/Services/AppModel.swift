@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import Foundation
 import UniformTypeIdentifiers
 
@@ -11,6 +12,28 @@ final class AppModel: ObservableObject {
 
     let preferences = AppPreferences()
     let transcriptStore = TranscriptStore()
+    let speech = SpeechService()
+
+    private var speechPreferenceObserver: AnyCancellable?
+    private var speechGeneration = UUID()
+    private var transcriptGeneration = UUID()
+
+    init() {
+        speechPreferenceObserver = preferences.$speechEnabled.dropFirst().sink { [weak self] _ in
+            self?.stopSpeech()
+        }
+    }
+
+    func stopSpeech() {
+        // Also suppress speech from translations that were pending at Stop/Off.
+        speechGeneration = UUID()
+        speech.stop()
+    }
+
+    func testSpeech(_ text: String) {
+        stopSpeech()
+        speech.enqueue(text, configuration: preferences.speechConfiguration)
+    }
 
     private let audioCapture = AudioCaptureService()
     private let transcriber = WhisperTranscriber()
@@ -159,6 +182,10 @@ final class AppModel: ObservableObject {
     }
 
     func clearTranscript() {
+        transcriptGeneration = UUID()
+        translationTail?.cancel()
+        translationTail = nil
+        stopSpeech()
         transcriptStore.resetSession()
         statusText = isRecording ? recordingStatus : "Ready"
     }
@@ -216,9 +243,14 @@ final class AppModel: ObservableObject {
         let reasoningEffort = preferences.lmStudioReasoningEffort
         let sourceLanguage = preferences.sourceLanguage
         let targetLanguage = preferences.targetLanguage
+        let session = transcriptGeneration
+        let speechSession = speechGeneration
+        let shouldSpeak = preferences.speechEnabled
+        let speechConfiguration = preferences.speechConfiguration
 
         translationTail = Task {
             await previous?.value
+            guard !Task.isCancelled, session == self.transcriptGeneration else { return }
             let client = TranslationClient(
                 baseURLString: baseURLString,
                 model: model,
@@ -231,12 +263,17 @@ final class AppModel: ObservableObject {
             do {
                 let translated = try await client.translate(sourceText)
                 await MainActor.run {
+                    guard !Task.isCancelled, session == self.transcriptGeneration else { return }
                     self.transcriptStore.markTranslated(id: id, translatedText: translated)
+                    if shouldSpeak, self.preferences.speechEnabled, speechSession == self.speechGeneration {
+                        self.speech.enqueue(translated, configuration: speechConfiguration)
+                    }
                     self.statusText = self.isRecording ? self.recordingStatus : (self.recordingTask == nil ? "Ready" : "Finishing transcription")
                     self.lastError = nil
                 }
             } catch {
                 await MainActor.run {
+                    guard !Task.isCancelled, session == self.transcriptGeneration else { return }
                     self.transcriptStore.markFailed(id: id, message: error.localizedDescription)
                     self.statusText = "Translation failed"
                     self.lastError = error.localizedDescription
