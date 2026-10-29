@@ -134,7 +134,8 @@ final class SpeechServiceTests: XCTestCase {
         service.enqueue("B", configuration: config)
         service.enqueue("A", configuration: config)
         try await waitUntil { !service.isBusy }
-        XCTAssertEqual(events, ["request:A", "start:A", "end:A", "request:B", "start:B", "end:B", "request:A", "start:A", "end:A"])
+        XCTAssertEqual(events.filter { !$0.hasPrefix("request:") }, ["start:A", "end:A", "start:B", "end:B", "start:A", "end:A"])
+        XCTAssertEqual(events.filter { $0.hasPrefix("request:") }, ["request:A", "request:B", "request:A"])
         XCTAssertEqual(service.pendingCount, 0)
     }
 
@@ -202,5 +203,131 @@ final class SpeechServiceTests: XCTestCase {
         XCTAssertNotNil(service.lastError)
         try await waitUntil { !service.isBusy }
         XCTAssertEqual(played, ["first", "second"])
+    }
+
+    func testPrefetchDuringPlaybackIsBoundedAndOutOfOrderResponsesStayFIFO() async throws {
+        var requests: [String] = []
+        var responses: [String: CheckedContinuation<Data, Never>] = [:]
+        var played: [String] = []
+        var finishes: [String: CheckedContinuation<Void, Never>] = [:]
+        let service = SpeechService(synthesize: { text, _ in
+            requests.append(text)
+            return await withCheckedContinuation { responses[text] = $0 }
+        }, play: { data in
+            let text = String(decoding: data, as: UTF8.self)
+            played.append(text)
+            await withCheckedContinuation { finishes[text] = $0 }
+        }, stopPlayback: {})
+        service.enqueue("A", configuration: config)
+        try await waitUntil { responses["A"] != nil }
+        responses.removeValue(forKey: "A")?.resume(returning: Data("A".utf8))
+        try await waitUntil { played == ["A"] }
+        for text in ["B", "C", "D"] { service.enqueue(text, configuration: config) }
+        try await waitUntil { requests.count == 3 }
+        XCTAssertEqual(requests, ["A", "B", "C"])
+        XCTAssertEqual(service.generatingCount, 2)
+        responses.removeValue(forKey: "C")?.resume(returning: Data("C".utf8))
+        try await waitUntil { service.readyCount == 1 }
+        XCTAssertEqual(played, ["A"])
+        XCTAssertEqual(requests.count, 3) // A ready buffer also occupies a prefetch slot.
+        finishes.removeValue(forKey: "A")?.resume()
+        responses.removeValue(forKey: "B")?.resume(returning: Data("B".utf8))
+        try await waitUntil { played == ["A", "B"] && requests.count == 4 }
+        XCTAssertEqual(service.pendingCount, 3)
+        service.stop()
+        // Even uncancellable completions after Stop must never play queued audio.
+        responses.removeValue(forKey: "D")?.resume(returning: Data("D".utf8))
+        finishes.removeValue(forKey: "B")?.resume()
+        for _ in 0..<5 { await Task.yield() }
+        XCTAssertEqual(played, ["A", "B"])
+        XCTAssertEqual(service.pendingCount, 0)
+        XCTAssertEqual(service.readyCount, 0)
+        XCTAssertEqual(service.generatingCount, 0)
+        XCTAssertNil(service.lastError)
+    }
+
+    func testPrefetchFailureWaitsForCurrentSentenceAndCancelsRemainingWork() async throws {
+        var finish: CheckedContinuation<Void, Never>?
+        var failed = false
+        var requests: [String] = []
+        var played: [String] = []
+        let service = SpeechService(synthesize: { text, _ in
+            requests.append(text)
+            if text == "fail" { failed = true; throw SpeechError.httpStatus(429) }
+            return Data(text.utf8)
+        }, play: { data in
+            played.append(String(decoding: data, as: UTF8.self))
+            await withCheckedContinuation { finish = $0 }
+        }, stopPlayback: {})
+        service.enqueue("A", configuration: config)
+        try await waitUntil { finish != nil }
+        service.enqueue("fail", configuration: config)
+        try await waitUntil { failed && service.generatingCount == 0 }
+        service.enqueue("discard", configuration: config)
+        XCTAssertEqual(requests, ["A", "fail"])
+        XCTAssertTrue(service.isBusy)
+        XCTAssertNil(service.lastError)
+        finish?.resume()
+        try await waitUntil { !service.isBusy }
+        XCTAssertEqual(played, ["A"])
+        XCTAssertTrue(try XCTUnwrap(service.lastError).contains("429"))
+    }
+
+    func testTimingsSeparateGenerationBufferedWaitAndPlaybackGap() async throws {
+        var clock = 0.0
+        var responses: [String: CheckedContinuation<Data, Never>] = [:]
+        var finishes: [String: CheckedContinuation<Void, Never>] = [:]
+        let service = SpeechService(prefetchCount: 1, synthesize: { text, _ in
+            await withCheckedContinuation { responses[text] = $0 }
+        }, play: { data in
+            let text = String(decoding: data, as: UTF8.self)
+            await withCheckedContinuation { finishes[text] = $0 }
+        }, stopPlayback: {}, now: { clock })
+        service.enqueue("A", configuration: config)
+        service.enqueue("B", configuration: config)
+        service.enqueue("C", configuration: config)
+        try await waitUntil { responses["A"] != nil }
+        clock = 2
+        responses.removeValue(forKey: "A")?.resume(returning: Data("A".utf8))
+        try await waitUntil { finishes["A"] != nil && responses["B"] != nil }
+        clock = 5
+        responses.removeValue(forKey: "B")?.resume(returning: Data("B".utf8))
+        try await waitUntil { service.readyCount == 1 }
+        clock = 10
+        finishes.removeValue(forKey: "A")?.resume()
+        try await waitUntil { finishes["B"] != nil && responses["C"] != nil }
+        clock = 12
+        finishes.removeValue(forKey: "B")?.resume()
+        try await waitUntil { service.pendingCount == 1 }
+        clock = 15
+        responses.removeValue(forKey: "C")?.resume(returning: Data("C".utf8))
+        try await waitUntil { finishes["C"] != nil }
+        let samples = service.recentTimings
+        XCTAssertEqual(samples.map(\.generationSeconds), [2, 3, 5])
+        XCTAssertEqual(samples.map(\.generationQueueSeconds), [0, 2, 10])
+        XCTAssertEqual(samples.map(\.playbackWaitSeconds), [0, 5, 0])
+        XCTAssertEqual(samples.map(\.totalWaitSeconds), [2, 10, 15])
+        XCTAssertNil(samples[0].gapSeconds)
+        XCTAssertEqual(samples[1].gapSeconds, 0)
+        XCTAssertEqual(samples[2].gapSeconds, 3)
+        finishes.removeValue(forKey: "C")?.resume()
+        try await waitUntil { !service.isBusy }
+    }
+
+    func testLongTranslationChunksSharePendingCountAndHistoryIsBounded() async throws {
+        var played: [String] = []
+        let service = SpeechService(maximumPending: 30, synthesize: { text, _ in Data(text.utf8) },
+                                   play: { played.append(String(decoding: $0, as: UTF8.self)) }, stopPlayback: {})
+        let text = String(repeating: "あ", count: 4_000)
+        service.enqueue(text, configuration: config)
+        XCTAssertEqual(service.pendingCount, 1)
+        try await waitUntil { !service.isBusy }
+        XCTAssertEqual(played.joined(), text)
+        XCTAssertEqual(played.count, 3)
+        for _ in 0..<22 { service.enqueue("A", configuration: config) }
+        try await waitUntil { !service.isBusy }
+        XCTAssertEqual(service.recentTimings.count, 20)
+        XCTAssertEqual(service.recentTimings.last?.id, 25)
+        XCTAssertEqual(service.pendingCount, 0)
     }
 }

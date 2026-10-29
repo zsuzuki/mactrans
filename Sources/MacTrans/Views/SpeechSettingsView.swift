@@ -22,6 +22,41 @@ struct SpeechSettingsView: View {
                 Button("Stop Speech") { model.stopSpeech() }
                 if speech.isBusy { Text("Pending: \(speech.pendingCount)").foregroundStyle(.secondary) }
             }
+            Text("Prefetch: up to 2 chunks · Generating: \(speech.generatingCount) · Ready: \(speech.readyCount)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let timing = speech.recentTimings.last {
+                Text("Last: generation \(timing.generationSeconds, specifier: "%.2f")s · ready wait \(timing.playbackWaitSeconds, specifier: "%.2f")s")
+                    .font(.caption)
+                DisclosureGroup("Speech timings (last 20 chunks)") {
+                    ScrollView {
+                        Grid(alignment: .trailing, horizontalSpacing: 12, verticalSpacing: 5) {
+                            GridRow {
+                                Text("#")
+                                Text("Generation")
+                                Text("Ready wait")
+                                Text("Total wait")
+                                Text("Gap")
+                            }.fontWeight(.medium)
+                            ForEach(speech.recentTimings.reversed()) { sample in
+                                GridRow {
+                                    Text("\(sample.id)")
+                                    Text("\(sample.generationSeconds, specifier: "%.2f")s")
+                                    Text("\(sample.playbackWaitSeconds, specifier: "%.2f")s")
+                                    Text("\(sample.totalWaitSeconds, specifier: "%.2f")s")
+                                    if let gap = sample.gapSeconds { Text("\(gap, specifier: "%.2f")s") }
+                                    else { Text("—") }
+                                }
+                            }
+                        }
+                        .font(.caption.monospacedDigit())
+                    }
+                    .frame(maxHeight: 180)
+                    Text("Ready wait is time buffered after generation. Total wait starts when translation is queued. Gap is time between playback calls, including waiting for the next translation; silence inside audio is not measured.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             if let error = speech.lastError {
                 Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled)
             }
