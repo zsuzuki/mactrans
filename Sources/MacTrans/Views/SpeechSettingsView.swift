@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct SpeechSettingsView: View {
@@ -25,6 +26,11 @@ struct SpeechSettingsView: View {
             Text("Prefetch: up to 2 chunks · Generating: \(speech.generatingCount) · Ready: \(speech.readyCount)")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if speech.retryingCount > 0 {
+                Text("Retrying temporary API failures: \(speech.retryingCount)")
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            SpeechDiagnosticsView(diagnostics: speech.diagnostics)
             if let timing = speech.recentTimings.last {
                 Text("Last: generation \(timing.generationSeconds, specifier: "%.2f")s · ready wait \(timing.playbackWaitSeconds, specifier: "%.2f")s")
                     .font(.caption)
@@ -63,6 +69,19 @@ struct SpeechSettingsView: View {
             Text("Enabling speech sends translated text to the Gemini API and may incur usage charges. The API key is stored in Keychain. With microphone input, use headphones to avoid capturing the spoken translation.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+private struct SpeechDiagnosticsView: View {
+    @ObservedObject var diagnostics: SpeechDiagnostics
+
+    var body: some View {
+        if let directory = diagnostics.directory {
+            Button("Open Speech Logs") { NSWorkspace.shared.open(directory) }
+            if let error = diagnostics.writeError {
+                Text(error).font(.caption).foregroundStyle(.red)
+            }
         }
     }
 }

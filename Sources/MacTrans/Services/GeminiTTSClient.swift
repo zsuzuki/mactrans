@@ -8,7 +8,7 @@ struct SpeechConfiguration: Sendable {
 
 enum SpeechError: LocalizedError {
     case missingAPIKey, missingModel, missingVoice, invalidAudio, inputTooLarge, queueFull
-    case httpStatus(Int)
+    case httpStatus(Int, retryAfter: Double? = nil)
 
     var errorDescription: String? {
         switch self {
@@ -18,7 +18,7 @@ enum SpeechError: LocalizedError {
         case .invalidAudio: "Gemini TTS did not return valid WAV audio."
         case .inputTooLarge: "Gemini TTS: a text character exceeds the app's speech chunk size."
         case .queueFull: "Speech queue is full. The newest translation was not queued; use Stop Speech to clear the backlog."
-        case .httpStatus(let code):
+        case .httpStatus(let code, _):
             switch code {
             case 400: "Gemini TTS: invalid request (HTTP 400). Check the model, voice and text."
             case 401, 403: "Gemini TTS: access denied (HTTP \(code)). Check the Gemini API key and project permissions."
@@ -31,7 +31,12 @@ enum SpeechError: LocalizedError {
 }
 
 struct GeminiTTSClient: Sendable {
-    private static let liveSession = URLSession(configuration: .ephemeral, delegate: NoSpeechRedirects(), delegateQueue: nil)
+    private static let liveSession: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 120
+        configuration.timeoutIntervalForResource = 120
+        return URLSession(configuration: configuration, delegate: NoSpeechRedirects(), delegateQueue: nil)
+    }()
     var session: URLSession = liveSession
 
     func synthesize(_ text: String, configuration: SpeechConfiguration) async throws -> Data {
@@ -41,9 +46,21 @@ struct GeminiTTSClient: Sendable {
         guard let response = response as? HTTPURLResponse else { throw SpeechError.invalidAudio }
         guard (200..<300).contains(response.statusCode) else {
             // Do not surface response bodies that may echo the key or translated text.
-            throw SpeechError.httpStatus(response.statusCode)
+            throw SpeechError.httpStatus(response.statusCode, retryAfter: Self.retryAfter(response.value(forHTTPHeaderField: "Retry-After")))
         }
         return try Self.decodeAudio(data)
+    }
+
+    static func retryAfter(_ value: String?, now: Date = Date()) -> Double? {
+        guard let value else { return nil }
+        if let seconds = Double(value.trimmingCharacters(in: .whitespacesAndNewlines)), seconds.isFinite, seconds >= 0 {
+            return seconds
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+        return formatter.date(from: value).map { max(0, $0.timeIntervalSince(now)) }
     }
 
     static func decodeAudio(_ data: Data) throws -> Data {

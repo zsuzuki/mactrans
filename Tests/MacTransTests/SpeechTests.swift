@@ -51,6 +51,13 @@ final class GeminiTTSClientTests: XCTestCase {
         let audio = try await client.synthesize("valid", configuration: configuration)
         XCTAssertEqual(audio, SpeechStubProtocol.wav)
         XCTAssertGreaterThan(try AVAudioPlayer(data: audio).duration, 0)
+        do {
+            _ = try await client.synthesize("busy", configuration: configuration)
+            XCTFail("Expected temporary API failure")
+        } catch SpeechError.httpStatus(let status, let retryAfter) {
+            XCTAssertEqual(status, 503)
+            XCTAssertEqual(retryAfter, 7)
+        }
         for text in ["denied", "invalid", "empty", "wrong-mime", "not-wav", "truncated", "legacy"] {
             do {
                 _ = try await client.synthesize(text, configuration: configuration)
@@ -81,7 +88,9 @@ private final class SpeechStubProtocol: URLProtocol, @unchecked Sendable {
         }
         let body = String(decoding: data, as: UTF8.self)
         let denied = body.contains("denied")
-        let response = HTTPURLResponse(url: request.url!, statusCode: denied ? 403 : 200, httpVersion: nil, headerFields: nil)!
+        let busy = body.contains("busy")
+        let response = HTTPURLResponse(url: request.url!, statusCode: denied ? 403 : (busy ? 503 : 200),
+                                       httpVersion: nil, headerFields: busy ? ["Retry-After": "7"] : nil)!
         let result: Data
         if denied { result = Data("secret-key".utf8) }
         else if body.contains("legacy") { result = Data("{\"audioContent\":\"AQID\"}".utf8) }
@@ -180,13 +189,13 @@ final class SpeechServiceTests: XCTestCase {
     func testFailureClearsBacklogAndAllowsNextRequest() async throws {
         var played: [String] = []
         let service = SpeechService(synthesize: { text, _ in
-            if text == "fail" { throw SpeechError.httpStatus(429) }
+            if text == "fail" { throw SpeechError.httpStatus(403) }
             return Data(text.utf8)
         }, play: { played.append(String(decoding: $0, as: UTF8.self)) }, stopPlayback: {})
         service.enqueue("fail", configuration: config)
         service.enqueue("discard", configuration: config)
         try await waitUntil { !service.isBusy }
-        XCTAssertTrue(try XCTUnwrap(service.lastError).contains("429"))
+        XCTAssertTrue(try XCTUnwrap(service.lastError).contains("403"))
         XCTAssertTrue(played.isEmpty)
         service.enqueue("next", configuration: config)
         try await waitUntil { !service.isBusy }
@@ -253,7 +262,7 @@ final class SpeechServiceTests: XCTestCase {
         var played: [String] = []
         let service = SpeechService(synthesize: { text, _ in
             requests.append(text)
-            if text == "fail" { failed = true; throw SpeechError.httpStatus(429) }
+            if text == "fail" { failed = true; throw SpeechError.httpStatus(403) }
             return Data(text.utf8)
         }, play: { data in
             played.append(String(decoding: data, as: UTF8.self))
@@ -270,7 +279,7 @@ final class SpeechServiceTests: XCTestCase {
         finish?.resume()
         try await waitUntil { !service.isBusy }
         XCTAssertEqual(played, ["A"])
-        XCTAssertTrue(try XCTUnwrap(service.lastError).contains("429"))
+        XCTAssertTrue(try XCTUnwrap(service.lastError).contains("403"))
     }
 
     func testTimingsSeparateGenerationBufferedWaitAndPlaybackGap() async throws {
