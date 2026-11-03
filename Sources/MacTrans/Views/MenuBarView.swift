@@ -1,6 +1,8 @@
+import AppKit
 import SwiftUI
 
 struct MenuBarView: View {
+    @Environment(\.openSettings) private var openSettings
     @ObservedObject var model: AppModel
     @ObservedObject var preferences: AppPreferences
 
@@ -78,8 +80,13 @@ struct MenuBarView: View {
 
             Divider()
 
-            SettingsLink {
-                Text("Settings...")
+            Button("Settings...") {
+                // Let the menu dismiss before taking focus from the previous app.
+                // Accessory apps aren't activated by opening their Settings scene.
+                DispatchQueue.main.async {
+                    NSApp.activate(ignoringOtherApps: true)
+                    openSettings()
+                }
             }
 
             Button("Quit MacTrans") {
