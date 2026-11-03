@@ -58,6 +58,7 @@ final class SpeechDiagnostics: ObservableObject {
     enum Event: String, Encodable {
         case started, queued, queueRejected, requestStarted, requestFailed, retryScheduled
         case generated, generationFailed, playbackStarted, playbackEnded, playbackFailed, stopped
+        case cooldownStarted, cooldownRestored, cooldownEnded
     }
 
     private struct Entry: Encodable {
@@ -74,6 +75,7 @@ final class SpeechDiagnostics: ObservableObject {
         var retryAfterSeconds: Double?
         var elapsedSeconds: Double?
         var retryDelaySeconds: Double?
+        var resumeAt: String?
     }
 
     let directory: URL?
@@ -91,14 +93,43 @@ final class SpeechDiagnostics: ObservableObject {
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     }
 
+    // Recover Retry-After recorded by earlier builds, without another API call.
+    func pendingCooldown(after now: Date) -> Date? {
+        struct FailureRecord: Decodable {
+            let timestamp: String
+            let event: String
+            let category: String?
+            let code: Int?
+            let retryAfterSeconds: Double?
+        }
+        guard let directory else { return nil }
+        var deadline: Date?
+        for index in 0...archiveCount {
+            let name = index == 0 ? "speech.jsonl" : "speech.\(index).jsonl"
+            guard let data = try? Data(contentsOf: directory.appendingPathComponent(name)) else { continue }
+            for line in data.split(separator: 0x0a) {
+                guard let record = try? JSONDecoder().decode(FailureRecord.self, from: Data(line)),
+                      record.event == "requestFailed", record.category == "http",
+                      let code = record.code, [408, 429, 500, 502, 503, 504].contains(code),
+                      let delay = record.retryAfterSeconds, delay.isFinite, delay > 60,
+                      let time = formatter.date(from: record.timestamp) else { continue }
+                let candidate = time.addingTimeInterval(delay)
+                if candidate > now { deadline = max(deadline ?? candidate, candidate) }
+            }
+        }
+        return deadline
+    }
+
     func record(_ event: Event, session: UUID, chunk: Int? = nil, attempt: Int? = nil,
-                pending: Int, failure: SpeechFailure? = nil, elapsed: Double? = nil, delay: Double? = nil) {
+                pending: Int, failure: SpeechFailure? = nil, elapsed: Double? = nil, delay: Double? = nil,
+                resumeAt: Date? = nil) {
         guard let directory else { return }
         let entry = Entry(timestamp: formatter.string(from: Date()), run: run, session: session,
             event: event, chunk: chunk, attempt: attempt, pending: pending,
             category: failure?.category, code: failure?.code, retryable: failure?.retryable,
             retryAfterSeconds: failure?.retryAfter.flatMap { $0.isFinite ? $0 : nil },
-            elapsedSeconds: elapsed, retryDelaySeconds: delay)
+            elapsedSeconds: elapsed, retryDelaySeconds: delay,
+            resumeAt: resumeAt.map { formatter.string(from: $0) })
         do {
             let fm = FileManager.default
             try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

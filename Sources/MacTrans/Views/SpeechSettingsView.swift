@@ -19,7 +19,7 @@ struct SpeechSettingsView: View {
             TextField("Test text", text: $testText)
             HStack {
                 Button("Test Speech") { model.testSpeech(testText) }
-                    .disabled(testText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(speech.resumeAt != nil || testText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 Button("Stop Speech") { model.stopSpeech() }
                 if speech.isBusy { Text("Pending: \(speech.pendingCount)").foregroundStyle(.secondary) }
             }
@@ -29,6 +29,9 @@ struct SpeechSettingsView: View {
             if speech.retryingCount > 0 {
                 Text("Retrying temporary API failures: \(speech.retryingCount)")
                     .font(.caption).foregroundStyle(.orange)
+            }
+            if let deadline = speech.resumeAt {
+                SpeechCooldownView(deadline: deadline)
             }
             SpeechDiagnosticsView(diagnostics: speech.diagnostics)
             if let timing = speech.recentTimings.last {
@@ -73,6 +76,27 @@ struct SpeechSettingsView: View {
     }
 }
 
+private struct SpeechCooldownView: View {
+    let deadline: Date
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Speech paused until \(deadline.formatted(date: .abbreviated, time: .standard))")
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                if deadline > context.date {
+                    Text("Time remaining: \(deadline, style: .timer)")
+                } else {
+                    Text("Speech can resume with the next translation.")
+                }
+            }
+            Text("The API requested a wait. Translations continue, but speech during the wait is skipped. New translations can be spoken after this time; availability is checked by the next request.")
+        }
+        .font(.caption)
+        .foregroundStyle(.orange)
+        .textSelection(.enabled)
+    }
+}
+
 private struct SpeechDiagnosticsView: View {
     @ObservedObject var diagnostics: SpeechDiagnostics
 
@@ -97,5 +121,9 @@ struct SpeechMenuView: View {
             model.stopSpeech()
         }
         if let error = speech.lastError { Text(error).font(.caption) }
+        if let deadline = speech.resumeAt {
+            Text("Speech paused until \(deadline.formatted(date: .abbreviated, time: .standard))")
+                .font(.caption)
+        }
     }
 }
