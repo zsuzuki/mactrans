@@ -100,11 +100,14 @@ Settings の `Gemini Text-to-Speech` で設定します。
 
 - `API key`: CLIで使っているGemini APIキー。macOS Keychainに保存します。以前の画面で入力したキーはそのまま引き継ぎます。
 - `Model`: 初期値はCLIと同じ `gemini-3.8-flash-tts`。自由入力です。
-- `Voice ID / name`: 保存済みの `voice_...` ID、または `Kore` などの音声名。以前に入力した音声IDを引き継ぎます。空欄はエラーになります。
+- `Voice`: Geminiの[Voices API](https://ai.google.dev/api/voices)から取得したカスタム音声・既成音声を一覧から選べます。設定を開くと保存済みAPIキーで一覧を読み込み、`Refresh Voices` で更新します。名前・言語・種類・IDで検索でき、選択した音声IDを保存します。一覧取得だけでは現在の選択を変更しません。
+- `Enter voice manually` → `Voice ID / name`: 一覧にない `voice_...` IDや `Kore` などの音声名も直接指定できます。以前に入力した音声IDを引き継ぎます。空欄はエラーになります。一覧取得に失敗しても手入力できます。
 - `Test text` / `Test Speech`: 任意の短い文章でAPI接続と再生を確認します。自動読み上げがオフでも使えます。
 - `Speak translations`: オンにした後に確定した発話の翻訳結果を自動で読み上げます。初期値はオフです。
 
 言語は翻訳テキストから判定されるため、TTS用の言語コード指定はありません。翻訳先を変更してもモデルと音声は自動変更しません。モデル・音声・言語の対応は利用者が選び、アプリでは組み合わせを制限しません。
+
+音声一覧は `GET /v1beta/voices` の全ページを読み込みます。音声生成は行わず、一覧はメモリ内に保持します。APIキー変更時は一覧を破棄し、`Load Voices` で新しいキーの一覧を取得できます。一覧取得のエラーは読み上げの待機期限や再生キューに影響しません。
 
 翻訳テキストをGemini APIへ送信し、APIの利用料金が発生する場合があります。音声ファイルはメモリ上で再生し、ディスクには保存しません。接続先は [Gemini TTSのInteractions API](https://ai.google.dev/gemini-api/docs/speech-generation) (`https://generativelanguage.googleapis.com/v1beta/interactions`) に固定しています。CLIと同じリクエスト形式で `store: false`、`stream: false`、WAV出力を指定します。Cloud Text-to-Speechの `text:synthesize` APIとは異なります。
 

@@ -12,7 +12,7 @@ struct SpeechSettingsView: View {
             Toggle("Speak translations", isOn: $preferences.speechEnabled)
             SecureField("API key", text: $preferences.googleTTSAPIKey)
             TextField("Model", text: $preferences.speechModel, prompt: Text("gemini-3.8-flash-tts"))
-            TextField("Voice ID / name", text: $preferences.speechVoiceName, prompt: Text("voice_… or Kore"))
+            SpeechVoicePicker(preferences: preferences)
             Text("Choose a Gemini TTS model and voice ID or name. Language is inferred from the translated text; model and voice settings are not changed automatically.")
                 .font(.caption)
                 .foregroundStyle(.secondary)

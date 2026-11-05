@@ -138,7 +138,7 @@ struct GeminiTTSClient: Sendable {
     }
 }
 
-private final class NoSpeechRedirects: NSObject, URLSessionTaskDelegate {
+final class NoSpeechRedirects: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest,
