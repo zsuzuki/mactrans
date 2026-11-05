@@ -49,6 +49,7 @@ INFO_PLIST="$APP_CONTENTS/Info.plist"
 mkdir -p "$APP_MACOS" "$APP_FRAMEWORKS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 cp -R "$(dirname "$BUILD_BINARY")/MacTrans_MacTrans.bundle" "$APP_RESOURCES/"
+cp "$ROOT_DIR/Assets/AppIcon.icns" "$APP_RESOURCES/"
 chmod +x "$APP_BINARY"
 
 cp "$WHISPER_BUILD/src"/libwhisper*.dylib "$APP_FRAMEWORKS/"
@@ -67,10 +68,14 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$BUNDLE_ID</string>
   <key>CFBundleName</key>
   <string>$APP_NAME</string>
+  <key>CFBundleIconFile</key>
+  <string>AppIcon</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>LSMinimumSystemVersion</key>
   <string>$MIN_SYSTEM_VERSION</string>
+  <key>LSUIElement</key>
+  <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSMicrophoneUsageDescription</key>

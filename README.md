@@ -62,6 +62,9 @@ WHISPER_CPP_DIR=/path/to/whisper.cpp ./script/build_and_run.sh
 ## 初期設定
 
 メニューバーの MacTrans アイコンから `Settings...` を開きます。
+設定画面を開いている間もDockには表示しません。設定画面を閉じた後も、録音・翻訳とメニューバーからの操作は続けられます。終了するには `Quit MacTrans` を選びます。
+
+アプリアイコンは `Assets/AppIcon.icns` をバンドルに同梱します。デザインを変更する場合は `script/generate_app_icon.swift` を編集し、`swift script/generate_app_icon.swift Assets` で再生成します。
 
 ### Audio Input
 
