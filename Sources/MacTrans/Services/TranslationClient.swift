@@ -4,6 +4,8 @@ enum TranslationClientError: LocalizedError {
     case invalidURL(String)
     case badStatus(Int, String)
     case emptyResponse
+    case unsupportedPLaMoLanguage(String)
+    case truncatedTranslation
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +15,10 @@ enum TranslationClientError: LocalizedError {
             "LM Studio returned HTTP \(status): \(body)"
         case .emptyResponse:
             "LM Studio returned an empty translation."
+        case .unsupportedPLaMoLanguage(let value):
+            "Unsupported PLaMo language: \(value). Use a supported language name or code (for example English/en or Japanese/ja)."
+        case .truncatedTranslation:
+            "PLaMo translation reached the output token limit. Reduce Max characters in Chunking."
         }
     }
 }
@@ -26,7 +32,32 @@ struct TranslationClient {
     var targetLanguage: String
 
     func translate(_ text: String) async throws -> String {
-        guard let url = URL(string: baseURLString) else {
+        let request = try makeRequest(text)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let httpResponse = response as? HTTPURLResponse, !(200..<300).contains(httpResponse.statusCode) {
+            let bodyText = String(data: data, encoding: .utf8) ?? ""
+            throw TranslationClientError.badStatus(httpResponse.statusCode, bodyText)
+        }
+        return try decodeTranslation(data)
+    }
+
+    func makeRequest(_ text: String) throws -> URLRequest {
+        guard var components = URLComponents(string: baseURLString),
+              ["http", "https"].contains(components.scheme?.lowercased() ?? ""),
+              let host = components.host, !host.isEmpty else {
+            throw TranslationClientError.invalidURL(baseURLString)
+        }
+        if usesPLaMo {
+            let path = components.path.hasSuffix("/") ? String(components.path.dropLast()) : components.path
+            if path.hasSuffix("/chat/completions") {
+                components.path = String(path.dropLast("/chat/completions".count)) + "/completions"
+            } else if path.hasSuffix("/completions") {
+                components.path = path
+            } else {
+                throw TranslationClientError.invalidURL(baseURLString)
+            }
+        }
+        guard let url = components.url else {
             throw TranslationClientError.invalidURL(baseURLString)
         }
 
@@ -36,6 +67,16 @@ struct TranslationClient {
         let trimmedAPIKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedAPIKey.isEmpty {
             request.setValue("Bearer \(trimmedAPIKey)", forHTTPHeaderField: "Authorization")
+        }
+
+        if usesPLaMo {
+            request.httpBody = try JSONEncoder().encode(PLaMoCompletionRequest(
+                model: model,
+                prompt: PLaMoTranslation.prompt(text: text, source: sourceLanguage, target: targetLanguage),
+                // Live transcription chunks are short, but allow expansion into token-heavy languages.
+                maxTokens: max(512, min(4096, text.utf8.count * 2))
+            ))
+            return request
         }
 
         let body = ChatRequest(
@@ -50,15 +91,22 @@ struct TranslationClient {
             stream: false
         )
         request.httpBody = try JSONEncoder().encode(body)
+        return request
+    }
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if let httpResponse = response as? HTTPURLResponse, !(200..<300).contains(httpResponse.statusCode) {
-            let bodyText = String(data: data, encoding: .utf8) ?? ""
-            throw TranslationClientError.badStatus(httpResponse.statusCode, bodyText)
+    private var usesPLaMo: Bool { PLaMoTranslation.matches(model) }
+
+    func decodeTranslation(_ data: Data) throws -> String {
+        let content: String
+        if usesPLaMo {
+            let choice = try JSONDecoder().decode(PLaMoCompletionResponse.self, from: data).choices.first
+            guard choice?.finishReason != "length" else { throw TranslationClientError.truncatedTranslation }
+            content = PLaMoTranslation.translationBody(choice?.text ?? "")
+        } else {
+            let decoded = try JSONDecoder().decode(ChatResponse.self, from: data)
+            content = decoded.choices.first?.message.content ?? ""
         }
-
-        let decoded = try JSONDecoder().decode(ChatResponse.self, from: data)
-        let translation = decoded.choices.first?.message.content.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let translation = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !translation.isEmpty else {
             throw TranslationClientError.emptyResponse
         }

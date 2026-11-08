@@ -8,7 +8,7 @@ MacTrans は、macOS 専用の準リアルタイム翻訳アプリです。メ�
 - マイク音声を `AVAudioEngine` で録音
 - システム音声を `ScreenCaptureKit` で直接取得（追加の仮想オーディオデバイスは不要）
 - `whisper.cpp` をアプリ内ブリッジ経由で呼び出してローカル文字起こし
-- LM Studio の OpenAI 互換 Chat Completions API で翻訳
+- LM Studio の OpenAI 互換 API で翻訳（通常は Chat Completions、PLaMo 3 Translate は Completions）
 - 原文と翻訳文を右下のフローティングオーバーレイに表示
 - オーバーレイから録音開始/停止、オートスクロール切り替え
 - セッション中の原文/翻訳文を一時ファイルへ保存
@@ -90,6 +90,17 @@ macOS 14対応のためディスプレイを指定したScreenCaptureKitスト�
 - `Thinking`: 翻訳用途では `Off` 推奨
 
 `API token` は macOS Keychain に保存されます。以前のバージョンで `UserDefaults` に保存されていた token は、起動時に Keychain へ移行して削除されます。
+
+#### PLaMo 3 Translate
+
+LM Studioでモデルをロードし、`Model` にサーバーのモデルID（例: `plamo-3-translate-31b`）を入力すると専用処理へ自動で切り替わります。`pfnet/plamo-3-translate-31b-MLX-4bit` やGGUFの量子化名も検出します。モデルIDを別名に変更した場合も、`plamo-3-translate` で始まる名前を使用してください（組織名のプレフィックスは可）。PLaMo 2や通常のPLaMo 3モデルは対象外です。
+
+- URLは通常の `/v1/chat/completions` のままで使えます。PLaMoへの送信時だけ `/v1/completions` に切り替えます。直接 `/v1/completions` を指定することもできますが、通常モデルへ戻す場合はChat CompletionsのURLに戻してください。
+- 原文と言語コードをPFML3形式に組み立てて送ります。systemメッセージやThinkingパラメーターは送信せず、設定画面のThinkingは無効になります。通常モデルへ戻すと元のThinking設定を使用します。
+- 翻訳用の言語指定は `English` / `Japanese` などの英語名、またはモデルが対応する `en` / `ja` などのコードを受け付けます。原文の `auto` は言語指定を省略します。中国語は `Chinese` / `zh` を簡体字として扱い、繁体字は `zh-hant` / `Traditional Chinese` で指定します。文字起こし側の言語対応は従来どおりです。
+- temperatureは0、停止文字列は `<|plamo:tag|>` と `<|plamo:bos|>` です。生成上限はチャンクのUTF-8バイト数の2倍（最小512・最大4096トークン）です。出力上限で途切れた翻訳はエラーにし、Chunkingの `Max characters` を減らすよう案内します。
+
+実装はPFNの[モデル説明とPFML3仕様](https://huggingface.co/pfnet/plamo-3-translate-31b-MLX-4bit#pfml3-prompt-format)に基づきます。LM Studioの[Completions API](https://lmstudio.ai/docs/developer/openai-compat/completions)ではチャットテンプレートが適用されないため、アプリで組み立てたPFML3をそのまま渡せます。モデル自体をロードするには、そのモデル形式に対応したLM Studioランタイムが必要です。
 
 ### whisper.cpp
 

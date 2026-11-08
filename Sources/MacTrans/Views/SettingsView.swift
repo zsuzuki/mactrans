@@ -37,6 +37,12 @@ struct SettingsView: View {
                     Text("High").tag("high")
                     Text("Server Default").tag("default")
                 }
+                .disabled(PLaMoTranslation.matches(preferences.lmStudioModel))
+                if PLaMoTranslation.matches(preferences.lmStudioModel) {
+                    Text("PLaMo 3 Translate mode: translation only; Thinking is not used. Language names such as English / Japanese or codes such as en / ja are supported. The URL switches to Completions automatically.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             SpeechSettingsView(model: model, preferences: preferences, speech: model.speech)
